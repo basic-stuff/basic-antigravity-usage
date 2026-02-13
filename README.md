@@ -11,7 +11,7 @@ This script connects to the Antigravity language server running on your machine 
 
 ## Requirements
 
-- Windows
+- **Windows**, **Linux**, or **macOS**
 - Node.js 18+
 - Antigravity IDE running and logged in
 
@@ -31,28 +31,31 @@ node index.js
 
 `index.js` runs this pipeline:
 
-1. Find Antigravity process
-- Runs PowerShell query (`Get-CimInstance Win32_Process`) and filters processes containing `antigravity`.
-- Reads process command line and extracts `--csrf_token`.
+1. **Find Antigravity process**
+   - **Windows**: Runs PowerShell query (`Get-CimInstance Win32_Process`).
+   - **Linux/macOS**: Runs `ps -e -o pid,args`.
+   - Filters processes containing `antigravity` and extracts `--csrf_token`.
 
-2. Find local listening ports for that process
-- Runs `netstat -ano`.
-- Matches rows where:
-  - PID = Antigravity PID
-  - state = `LISTENING`
-  - address starts with `127.0.0.1`
+2. **Find local listening ports**
+   - **Windows**: Runs `netstat -ano`.
+   - **Linux**: Runs `ss -lptn` (primary) or `netstat -tlpn` (fallback).
+   - **macOS**: Runs `lsof` (primary) or `netstat` (fallback).
+   - Matches rows where:
+     - PID matches Antigravity PID
+     - State is `LISTENING`
+     - Address starts with `127.0.0.1`
 
-3. Probe Antigravity local API
-- Tries each discovered port with HTTPS POST to:
-  - `/exa.language_server_pb.LanguageServerService/GetUserStatus`
-- Sends required headers, including `X-Codeium-Csrf-Token`.
-- Uses a 5s timeout.
+3. **Probe Antigravity local API**
+   - Tries each discovered port with HTTPS POST to:
+     - `/exa.language_server_pb.LanguageServerService/GetUserStatus`
+   - Sends required headers, including `X-Codeium-Csrf-Token`.
+   - Uses a 5s timeout.
 
-4. Parse and print usage
-- Reads `userStatus` from API response.
-- Prints account email and plan credit usage.
-- Reads model quota config and hides autocomplete/embedding entries.
-- Prints remaining percentage and reset time for each displayed model.
+4. **Parse and print usage**
+   - Reads `userStatus` from API response.
+   - Prints account email and plan credit usage.
+   - Reads model quota config and hides autocomplete/embedding entries.
+   - Prints remaining percentage and reset time for each displayed model.
 
 ## Output example
 

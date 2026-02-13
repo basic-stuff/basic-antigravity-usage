@@ -2,6 +2,7 @@
 const https = require("https");
 
 const REQUEST_TIMEOUT_MS = 5000;
+const IS_WINDOWS = process.platform === "win32";
 
 function runCommand(command) {
   return new Promise((resolve, reject) => {
@@ -24,7 +25,11 @@ function extractArgValue(commandLine, flagName) {
   return match[1] || match[2] || null;
 }
 
-async function findAntigravityProcess() {
+// -----------------------------------------------------------------------------
+// Windows Implementation
+// -----------------------------------------------------------------------------
+
+async function findAntigravityProcessWin32() {
   const processQuery = [
     "powershell -NoProfile -Command",
     '"Get-CimInstance Win32_Process',
@@ -71,7 +76,7 @@ async function findAntigravityProcess() {
   return null;
 }
 
-async function findListeningPorts(pid) {
+async function findListeningPortsWin32(pid) {
   let output;
   try {
     output = await runCommand("netstat -ano");
@@ -114,6 +119,137 @@ async function findListeningPorts(pid) {
 
   return [...ports];
 }
+
+// -----------------------------------------------------------------------------
+// Linux/Unix Implementation
+// -----------------------------------------------------------------------------
+
+async function findAntigravityProcessUnix() {
+  let output;
+  try {
+    // List all processes with PID and command line arguments
+    // "ps -e -o pid,args" is standard POSIX
+    output = await runCommand("ps -e -o pid,args");
+  } catch {
+    return null;
+  }
+
+  const lines = output.split('\n');
+  for (const line of lines) {
+    // Basic filtering to optimize
+    if (!line.includes("antigravity") && !line.includes("node")) continue;
+
+    // Parse PID and Command
+    // ps output format can vary, but generally: "  PID COMMAND ARGUMENTS..."
+    // We trim and match the first number as PID, rest as command
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    if (!match) continue;
+
+    const pid = match[1];
+    const commandLine = match[2];
+
+    if (!commandLine.includes("--csrf_token")) continue;
+
+    const csrfToken = extractArgValue(commandLine, "--csrf_token");
+    if (csrfToken) {
+      return {
+        pid,
+        csrfToken
+      };
+    }
+  }
+  return null;
+}
+
+async function findListeningPortsUnix(pid) {
+  const ports = new Set();
+
+  // 1. Try ss (modern Linux)
+  try {
+    const output = await runCommand("ss -lptn");
+    const lines = output.split('\n');
+    for (const line of lines) {
+      // Look for the PID in the users list, e.g., users:(("node",pid=1234,fd=18))
+      if (!line.includes(`pid=${pid},`) && !line.includes(`pid=${pid})`)) continue;
+
+      // Extract port from 127.0.0.1:PORT
+      const match = line.match(/127\.0\.0\.1:(\d+)/);
+      if (match) {
+        const port = Number(match[1]);
+        if (Number.isInteger(port) && port > 0) ports.add(port);
+      }
+    }
+  } catch (e) {
+    // Fallback if ss fails
+  }
+
+  // 2. Try lsof (standard on macOS, common on Linux)
+  if (ports.size === 0) {
+    try {
+      // -a: AND selection
+      // -P: no port names
+      // -n: no host names
+      // -iTCP -sTCP:LISTEN: only listening TCP sockets
+      // -p: restrict to PID
+      const output = await runCommand(`lsof -a -P -n -iTCP -sTCP:LISTEN -p ${pid}`);
+      const lines = output.split('\n');
+      for (const line of lines) {
+        const match = line.match(/127\.0\.0\.1:(\d+)/);
+        if (match) {
+          const port = Number(match[1]);
+          if (Number.isInteger(port) && port > 0) ports.add(port);
+        }
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  // 3. Try netstat (legacy Linux)
+  if (ports.size === 0) {
+    try {
+      const output = await runCommand("netstat -tlpn");
+      const lines = output.split('\n');
+      for (const line of lines) {
+        // Check for PID. format: "PID/ProgramName"
+        // e.g. "1234/node"
+        if (!line.includes(` ${pid}/`)) continue;
+
+        const match = line.match(/127\.0\.0\.1:(\d+)/);
+        if (match) {
+          const port = Number(match[1]);
+          if (Number.isInteger(port) && port > 0) ports.add(port);
+        }
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  return [...ports];
+}
+
+// -----------------------------------------------------------------------------
+// Cross-Platform Dispatchers
+// -----------------------------------------------------------------------------
+
+async function findAntigravityProcess() {
+  if (IS_WINDOWS) {
+    return findAntigravityProcessWin32();
+  }
+  return findAntigravityProcessUnix();
+}
+
+async function findListeningPorts(pid) {
+  if (IS_WINDOWS) {
+    return findListeningPortsWin32(pid);
+  }
+  return findListeningPortsUnix(pid);
+}
+
+// -----------------------------------------------------------------------------
+// Main Logic
+// -----------------------------------------------------------------------------
 
 function fetchUserStatus(port, csrfToken) {
   return new Promise((resolve, reject) => {
@@ -228,7 +364,7 @@ function printUsage(status) {
 async function main() {
   const processInfo = await findAntigravityProcess();
   if (!processInfo) {
-    throw new Error("Could not find an Antigravity process with csrf token.");
+    throw new Error("Could not find an Antigravity process with csrf token.\\nMake sure Antigravity is running.");
   }
 
   const ports = await findListeningPorts(processInfo.pid);
